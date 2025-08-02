@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>高级无限画布编辑器 - 最终修复版</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --font-main: 'Caveat', cursive;
+            --color-background: #1a1a2e;
+            --color-grid: rgba(224, 224, 255, 0.1);
+            --color-primary: #9b59b6;
+            --color-primary-dark: #8e44ad;
+            --color-text: #e0e0ff;
+            --color-ui-bg: #1f2a40;
+            --color-ui-border: var(--color-primary);
+            --color-selection: #f1c40f;
+            --color-preview-border: #e0e0ff;
+            --color-preview-bg: rgba(155, 89, 182, 0.1);
+        }
+
+        /* --- 主题系统 --- */
+        body[data-theme="comic-book"] { --color-background: #f0f0f0; --color-grid: rgba(0, 0, 0, 0.1); --color-primary: #e74c3c; --color-primary-dark: #c0392b; --color-text: #2c3e50; --color-ui-bg: #ffffff; --color-ui-border: #3498db; --color-selection: #f1c40f; --color-preview-border: #2c3e50; --color-preview-bg: rgba(52, 152, 219, 0.1); }
+        body[data-theme="pastel-dream"] { --color-background: #fdf6f7; --color-grid: rgba(214, 186, 191, 0.2); --color-primary: #a7c5eb; --color-primary-dark: #87a8d0; --color-text: #6b5b5e; --color-ui-bg: #ffffff; --color-ui-border: #f7d6e0; --color-selection: #f3b0c3; --color-preview-border: #a7c5eb; --color-preview-bg: rgba(167, 197, 235, 0.2); }
+        body[data-theme="vintage-toon"] { --color-background: #f3eacb; --color-grid: rgba(139, 69, 19, 0.1); --color-primary: #c0392b; --color-primary-dark: #a5281b; --color-text: #5a3d2b; --color-ui-bg: #fffbf0; --color-ui-border: #774f38; --color-selection: #f79f79; --color-preview-border: #5a3d2b; --color-preview-bg: rgba(192, 57, 43, 0.1); }
+
+        body { margin: 0; padding: 0; overflow: hidden; font-family: sans-serif; background-color: var(--color-background); color: var(--color-text); transition: background-color 0.3s, color 0.3s; }
+        #viewport { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; overflow: hidden; }
+        #canvas { position: absolute; top: 0; left: 0; width: 1px; height: 1px; transform-origin: 0 0; background-image: radial-gradient(circle at 1px 1px, var(--color-grid) 1px, transparent 0); background-size: 30px 30px; }
+        #drawing-layer { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 5; }
+
+        /* 基础形状 */
+        .shape { position: absolute; user-select: none; background-color: transparent; box-sizing: border-box; }
+        .shape.selected { /* 统一用 box-shadow 做选中效果，兼容所有形状 */ box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-selection) 80%, transparent), 0 0 15px color-mix(in srgb, var(--color-selection) 50%, transparent); }
+        .shape img { width: 100%; height: 100%; object-fit: contain; }
+
+        /* 动态样式类 */
+        .text-shape { border: none !important; padding: 15px 20px; font-size: 32px; line-height: 1.2; color: var(--color-text); font-family: var(--font-main); white-space: pre-wrap; word-break: break-word; }
+        .corner-straight { border-radius: 0 !important; }
+        .corner-rounded { border-radius: 15px !important; }
+
+        .line-style-1 { border-radius: 255px 25px 225px 25px / 25px 225px 25px 255px; }
+        .line-style-2 { border-radius: 63% 37% 54% 46% / 55% 48% 52% 45%; }
+        .line-style-3 { border-radius: 4px 80px 8px 80px / 80px 8px 80px 8px; }
+
+        /* BUGFIX 1 & 2: 菱形边框和位置修复 */
+        .diamond-shape {
+            clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+            border: none !important; /* 移除原生边框，避免干扰 */
+            position: relative;
+            /* 定义CSS变量用于JS控制 */
+            --diamond-border-color: var(--color-primary);
+            --diamond-border-width: 2px;
+        }
+        .diamond-shape::before {
+            content: '';
+            position: absolute;
+            z-index: -1;
+            /* 通过 calc 和 CSS 变量，让伪元素比父元素大一个边框的宽度 */
+            top: calc(-1 * var(--diamond-border-width));
+            left: calc(-1 * var(--diamond-border-width));
+            width: calc(100% + 2 * var(--diamond-border-width));
+            height: calc(100% + 2 * var(--diamond-border-width));
+            /* 伪元素的背景就是“边框” */
+            background-color: var(--diamond-border-color);
+            clip-path: inherit;
+        }
+
+        .line-shape { height: 0 !important; border-top-style: solid; border-top-color: inherit; border-top-width: inherit; transform-origin: left center; }
+
+        /* BUGFIX 3: 箭头修复 */
+        .arrow-shape {
+            height: 0 !important;
+            border-top-style: solid;
+            border-top-color: inherit;
+            border-top-width: inherit;
+            transform-origin: left center;
+            box-sizing: content-box; /* 核心：让 border 不会画在 padding 上 */
+        }
+        .arrow-shape::after {
+            --arrow-head-size: 14px;
+            content: '';
+            position: absolute;
+            right: 0; /* 定位到 padding 区域的末端 */
+            top: 50%;
+            transform: translateY(-50%) rotate(45deg);
+            width: var(--arrow-head-size);
+            height: var(--arrow-head-size);
+            border-top-style: solid;
+            border-right-style: solid;
+            border-color: inherit;
+            border-width: inherit;
+            box-sizing: border-box;
+        }
+
+        .preview-shape { pointer-events: none; border-style: dashed !important; border-color: var(--color-preview-border) !important; background: var(--color-preview-bg) !important; }
+
+        /* UI 面板 */
+        .ui-panel { position: fixed; left: 50%; transform: translate(-50%, 10px); width: auto; max-width: 90vw; background-color: var(--color-ui-bg); border: 2px solid var(--color-ui-border); padding: 15px 20px; box-sizing: border-box; color: var(--color-text); font-family: sans-serif; z-index: 20; border-radius: 12px; box-shadow: 0 5px 20px color-mix(in srgb, var(--color-primary) 20%, transparent); display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; visibility: hidden; opacity: 0; transition: opacity 0.2s ease, transform 0.2s ease, visibility 0s 0.2s; }
+        .ui-panel.visible { visibility: visible; opacity: 1; transform: translate(-50%, 0); transition: opacity 0.2s ease, transform 0.2s ease; }
+        #property-panel, #theme-panel, #handwrite-panel { bottom: 80px; }
+
+        .prop-group { margin-bottom: 0; display: flex; flex-direction: column; align-items: center; }
+        .prop-group label { display: block; margin-bottom: 8px; font-size: 12px; text-align: center; }
+        .prop-group input[type="color"] { width: 50px; height: 30px; border: 1px solid #555; padding: 2px; background: #333; cursor: pointer; }
+        .prop-group .sub-group { display: flex; align-items: center; gap: 10px; }
+        .button-group { display: flex; gap: 8px; }
+        .button-group button, .layer-buttons button, #toolbar button { font-family: sans-serif; font-size: 14px; font-weight: bold; padding: 8px 12px; border: 1px solid var(--color-primary-dark); background-color: var(--color-ui-bg); color: var(--color-text); border-radius: 8px; cursor: pointer; transition: background-color 0.2s, color 0.2s, border-color 0.2s; flex-grow: 1; }
+        .button-group button.active, .layer-buttons button:hover, #toolbar button:hover { background-color: color-mix(in srgb, var(--color-primary) 50%, transparent); }
+        #toolbar button.active { background-color: var(--color-primary); }
+        .layer-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .prop-divider { width: 1px; background-color: var(--color-primary-dark); align-self: stretch; margin: 0 10px; }
+
+        #toolbar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--color-ui-bg); padding: 8px; border-radius: 12px; border: 2px solid var(--color-ui-border); box-shadow: 0 5px 20px color-mix(in srgb, var(--color-primary) 20%, transparent); z-index: 10; display: flex; flex-wrap: wrap; gap: 8px; transition: background-color 0.3s, border-color 0.3s; }
+        #text-measurer { position: absolute; visibility: hidden; height: auto; width: auto; white-space: nowrap; font-family: var(--font-main); font-size: 32px; padding: 15px 20px; }
+        .temp-text-input { position: absolute; z-index: 100; border: 2px dashed var(--color-primary); background: var(--color-background); color: var(--color-text); font-family: var(--font-main); font-size: 32px; line-height: 1.2; padding: 13px 18px; resize: none; outline: none; border-radius: 10px; }
+    </style>
+</head>
+<body data-theme="default">
+<!-- UI Elements remain the same -->
+<div id="property-panel" class="ui-panel">
+    <div class="prop-group" id="stroke-color-prop-group"> <label>描边颜色</label> <input type="color" id="stroke-color"> </div>
+    <div class="prop-group" id="stroke-width-prop-group"> <label>描边宽度</label> <div class="button-group" id="stroke-width-group"> <button data-value="2px" class="active">细</button> <button data-value="4px">中</button> <button data-value="7px">宽</button> </div> </div>
+    <div class="prop-group" id="border-style-prop-group"> <label>边框样式</label> <div class="button-group" id="border-style-group"> <button data-value="solid" class="active">实线</button> <button data-value="dashed">虚线</button> <button data-value="dotted">点状</button> </div> </div>
+    <div class="prop-divider" id="prop-divider-1"></div>
+    <div class="prop-group" id="line-style-prop-group"> <label>线条风格</label> <div class="button-group" id="line-style-group"> <button data-value="line-style-1" class="active">手绘1</button> <button data-value="line-style-2">手绘2</button> <button data-value="line-style-3">手绘3</button> </div> </div>
+    <div class="prop-group" id="corner-style-prop-group"> <label>边角</label> <div class="button-group" id="corner-style-group"> <button data-value="corner-straight">直角</button> <button data-value="corner-rounded" class="active">圆角</button> </div> </div>
+    <div class="prop-divider" id="prop-divider-2"></div>
+    <div class="prop-group" id="bg-prop-group"> <label>背景</label> <div class="sub-group"> <input type="checkbox" id="bg-toggle" style="cursor: pointer;"> <input type="color" id="bg-color" disabled> </div> </div>
+    <div class="prop-group" id="layer-prop-group" style="display: none;"> <label>图层</label> <div class="layer-buttons"> <button id="btn-front">置顶</button> <button id="btn-back">置底</button> <button id="btn-up">上移</button> <button id="btn-down">下移</button> </div> </div>
+</div>
+<div id="theme-panel" class="ui-panel">
+    <div class="prop-group"> <label>选择主题</label> <div class="button-group" id="theme-group"> <button data-theme="default" class="active">紫夜</button> <button data-theme="comic-book">漫画书</button> <button data-theme="pastel-dream">粉彩梦</button> <button data-theme="vintage-toon">复古卡通</button> </div> </div>
+</div>
+<div id="handwrite-panel" class="ui-panel">
+    <div class="prop-group"> <label>画笔颜色</label> <input type="color" id="handwrite-color"> </div>
+    <div class="prop-group"> <label>画笔粗细</label> <div class="button-group" id="handwrite-width-group"> <button data-value="2" class="active">细</button> <button data-value="5">中</button> <button data-value="10">粗</button> </div> </div>
+</div>
+<div id="toolbar">
+    <button data-tool="select" class="active">选择</button>
+    <button data-tool="rectangle">矩形</button>
+    <button data-tool="circle">圆形</button>
+    <button data-tool="diamond">菱形</button>
+    <button data-tool="line">线条</button>
+    <button data-tool="arrow">箭头</button>
+    <button data-tool="text">文字</button>
+    <button data-tool="handwrite">手写</button>
+    <button data-tool="theme">主题</button>
+</div>
+<div id="viewport">
+    <div id="canvas"></div>
+    <canvas id="drawing-layer"></canvas>
+</div>
+<div id="text-measurer"></div>
+
+<script>
+    // --- STATE & CONSTANTS ---
+    const state = {
+        camera: { x: 0, y: 0, scale: 1 },
+        currentTool: 'select',
+        isPanning: false, isDrawing: false, isDraggingShape: false,
+        selectedShape: null, zIndexCounter: 1,
+        panStart: { x: 0, y: 0 },
+        drawing: { shape: null, startX: 0, startY: 0 },
+        dragShapeStart: { x: 0, y: 0, offsetX: 0, offsetY: 0 },
+        defaultShapeProps: {
+            borderColor: '#9b59b6', borderWidth: '2px', borderStyle: 'solid',
+            lineStyleClass: 'line-style-1', cornerStyleClass: 'corner-rounded',
+            backgroundColor: 'transparent',
+        },
+        handwriting: { ctx: null, isDrawing: false, color: '#9b59b6', width: 2 }
+    };
+
+    const DOMElements = {
+        viewport: document.getElementById('viewport'),
+        canvas: document.getElementById('canvas'),
+        toolbar: document.getElementById('toolbar'),
+        propertyPanel: document.getElementById('property-panel'),
+        themePanel: document.getElementById('theme-panel'),
+        handwritePanel: document.getElementById('handwrite-panel'),
+        layerPropGroup: document.getElementById('layer-prop-group'),
+        textMeasurer: document.getElementById('text-measurer'),
+        drawingLayer: document.getElementById('drawing-layer'),
+    };
+
+    // --- CORE FUNCTIONS ---
+    const screenToWorld = (x, y) => ({ x: (x - state.camera.x) / state.camera.scale, y: (y - state.camera.y) / state.camera.scale });
+    const updateTransform = () => DOMElements.canvas.style.transform = `translate(${state.camera.x}px, ${state.camera.y}px) scale(${state.camera.scale})`;
+    const rgbToHex = (rgb) => { try { if (!rgb || rgb.startsWith('#')) return rgb; let [r, g, b] = rgb.match(/\d+/g).map(Number); return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1); } catch (e) { return '#000000'; } };
+    const getPixelValue = (str) => parseFloat(str) || 0;
+
+    // --- UI & SELECTION ---
+    function showPanel(panel) {
+        hideAllPanels();
+        panel.classList.add('visible');
+        if (panel === DOMElements.propertyPanel) {
+            DOMElements.layerPropGroup.style.display = state.selectedShape ? 'block' : 'none';
+            updatePropertyPanelVisibility();
+        }
+    }
+    function hideAllPanels() {
+        DOMElements.propertyPanel.classList.remove('visible');
+        DOMElements.themePanel.classList.remove('visible');
+        DOMElements.handwritePanel.classList.remove('visible');
+    }
+    function updateCursor() {
+        const cursorMap = {
+            select: state.isPanning ? 'grabbing' : 'grab',
+            handwrite: 'crosshair',
+            default: 'crosshair'
+        };
+        DOMElements.viewport.style.cursor = cursorMap[state.currentTool] || cursorMap.default;
+        if (state.currentTool === 'select') {
+            DOMElements.canvas.querySelectorAll('.shape').forEach(s => s.style.cursor = 'move');
+        } else {
+            DOMElements.canvas.querySelectorAll('.shape').forEach(s => s.style.cursor = 'default');
+        }
+    }
+    function deselectAll() {
+        if (state.selectedShape) state.selectedShape.classList.remove('selected');
+        state.selectedShape = null;
+        if (state.currentTool === 'select') hideAllPanels();
+    }
+    function selectShape(shapeElement) {
+        deselectAll();
+        state.selectedShape = shapeElement;
+        shapeElement.classList.add('selected');
+        updatePropertyPanel();
+        showPanel(DOMElements.propertyPanel);
+    }
+
+    // --- PROPERTY PANEL LOGIC ---
+    function updatePropertyPanel() {
+        const isShapeSelected = !!state.selectedShape;
+        const props = isShapeSelected ? getShapeProps(state.selectedShape) : state.defaultShapeProps;
+        document.getElementById('stroke-color').value = props.borderColor;
+        const bgColor = props.backgroundColor;
+        const isTransparent = bgColor === 'transparent' || !bgColor;
+        document.getElementById('bg-toggle').checked = !isTransparent;
+        document.getElementById('bg-color').disabled = isTransparent;
+        document.getElementById('bg-color').value = isTransparent ? '#1a1a2e' : bgColor;
+        updateButtonGroup('stroke-width-group', props.borderWidth);
+        updateButtonGroup('border-style-group', props.borderStyle);
+        updateButtonGroup('line-style-group', props.lineStyleClass);
+        updateButtonGroup('corner-style-group', props.cornerStyleClass);
+    }
+
+    function updatePropertyPanelVisibility() {
+        const type = state.selectedShape ? state.selectedShape.dataset.shapeType : state.currentTool;
+        const show = (id, condition) => document.getElementById(id).style.display = condition ? 'flex' : 'none';
+
+        const isShapeWithBorder = ['rectangle', 'circle', 'diamond', 'line', 'arrow'].includes(type);
+        const isShapeWithFill = ['rectangle', 'circle', 'diamond'].includes(type);
+        const isShapeWithCorners = ['rectangle'].includes(type);
+        const isShapeWithLineStyle = ['rectangle', 'diamond'].includes(type);
+        const isShapeWithBorderStyle = ['rectangle', 'line', 'arrow', 'circle'].includes(type);
+
+        show('stroke-color-prop-group', isShapeWithBorder);
+        show('stroke-width-prop-group', isShapeWithBorder);
+        show('border-style-prop-group', isShapeWithBorderStyle);
+        show('bg-prop-group', isShapeWithFill);
+        show('corner-style-prop-group', isShapeWithCorners);
+        show('line-style-prop-group', isShapeWithLineStyle);
+
+        const divider1 = document.getElementById('prop-divider-1');
+        const divider2 = document.getElementById('prop-divider-2');
+        divider1.style.display = (isShapeWithCorners || isShapeWithLineStyle) && isShapeWithFill ? 'block' : 'none';
+        divider2.style.display = isShapeWithFill && DOMElements.layerPropGroup.style.display !== 'none' ? 'block' : 'none';
+    }
+
+    function getShapeProps(shapeElement) {
+        if (shapeElement.dataset.shapeType.match(/handwrite|text/)) return state.defaultShapeProps;
+
+        const style = window.getComputedStyle(shapeElement);
+        const props = {
+            lineStyleClass: [...shapeElement.classList].find(c => c.startsWith('line-style-')) || 'line-style-1',
+            cornerStyleClass: [...shapeElement.classList].find(c => c.startsWith('corner-')) || 'corner-rounded',
+            backgroundColor: rgbToHex(style.backgroundColor),
+        };
+
+        if (shapeElement.dataset.shapeType === 'diamond') {
+            props.borderColor = rgbToHex(style.getPropertyValue('--diamond-border-color'));
+            props.borderWidth = style.getPropertyValue('--diamond-border-width');
+            props.borderStyle = 'solid';
+        } else {
+            props.borderColor = rgbToHex(style.borderColor);
+            props.borderWidth = style.borderTopWidth;
+            props.borderStyle = style.borderStyle;
+        }
+        return props;
+    }
+    function updateButtonGroup(groupId, value) {
+        const group = document.getElementById(groupId);
+        if (!group) return;
+        group.querySelector('.active')?.classList.remove('active');
+        const buttonToActivate = group.querySelector(`[data-value="${value}"]`);
+        if (buttonToActivate) buttonToActivate.classList.add('active');
+    }
+
+    // --- EVENT HANDLERS ---
+    function handleToolbarClick(e) {
+        const button = e.target.closest('button');
+        if (!button) return;
+        const tool = button.dataset.tool;
+        deselectAll();
+        hideAllPanels();
+
+        state.currentTool = tool;
+        DOMElements.toolbar.querySelector('.active')?.classList.remove('active');
+        button.classList.add('active');
+
+        if (tool === 'theme') { showPanel(DOMElements.themePanel); }
+        else if (tool === 'handwrite') { showPanel(DOMElements.handwritePanel); }
+        else if (tool !== 'select' && tool !== 'text') {
+            updatePropertyPanel();
+            showPanel(DOMElements.propertyPanel);
+        }
+
+        DOMElements.drawingLayer.style.pointerEvents = tool === 'handwrite' ? 'auto' : 'none';
+        updateCursor();
+    }
+
+    function handleMouseDown(e) {
+        if (e.target.closest('.ui-panel')) return;
+
+        if (state.currentTool === 'theme') {
+            state.currentTool = 'select';
+            DOMElements.toolbar.querySelector('.active')?.classList.remove('active');
+            DOMElements.toolbar.querySelector('button[data-tool="select"]').classList.add('active');
+            hideAllPanels();
+            updateCursor();
+        }
+
+        const startPos = screenToWorld(e.clientX, e.clientY);
+        state.drawing.startX = startPos.x;
+        state.drawing.startY = startPos.y;
+
+        const targetShape = e.target.closest('.shape');
+        if (state.currentTool === 'select') {
+            if (targetShape) {
+                state.isDraggingShape = true;
+                selectShape(targetShape);
+                const shapeRect = targetShape.getBoundingClientRect();
+                state.dragShapeStart.offsetX = (e.clientX - shapeRect.left) / state.camera.scale;
+                state.dragShapeStart.offsetY = (e.clientY - shapeRect.top) / state.camera.scale;
+            } else {
+                state.isPanning = true;
+                state.panStart = { x: e.clientX - state.camera.x, y: e.clientY - state.camera.y };
+                deselectAll();
+            }
+        } else if (state.currentTool === 'handwrite') {
+            state.handwriting.isDrawing = true;
+            state.handwriting.ctx.beginPath();
+            state.handwriting.ctx.moveTo(e.clientX, e.clientY);
+        } else {
+            state.isDrawing = true;
+            if (state.currentTool !== 'text') {
+                const previewShape = createShapeElement(state.currentTool, 'preview-shape');
+                previewShape.style.left = `${startPos.x}px`;
+                previewShape.style.top = `${startPos.y}px`;
+                DOMElements.canvas.appendChild(previewShape);
+                state.drawing.shape = previewShape;
+            }
+        }
+        updateCursor();
+    }
+
+    function handleMouseMove(e) {
+        if (state.isPanning) {
+            state.camera.x = e.clientX - state.panStart.x;
+            state.camera.y = e.clientY - state.panStart.y;
+            updateTransform();
+        } else if (state.isDraggingShape) {
+            const mouseWorldPos = screenToWorld(e.clientX, e.clientY);
+            state.selectedShape.style.left = `${mouseWorldPos.x - state.dragShapeStart.offsetX}px`;
+            state.selectedShape.style.top = `${mouseWorldPos.y - state.dragShapeStart.offsetY}px`;
+        } else if (state.isDrawing && state.drawing.shape) {
+            const currentPos = screenToWorld(e.clientX, e.clientY);
+            const shape = state.drawing.shape;
+            const tool = state.currentTool;
+
+            if (tool === 'line' || tool === 'arrow') {
+                const dx = currentPos.x - state.drawing.startX;
+                const dy = currentPos.y - state.drawing.startY;
+                const length = Math.hypot(dx, dy);
+                const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+
+                let drawLength = length;
+                // BUGFIX 3: Pre-calculate padding during drawing for correct preview
+                if (tool === 'arrow') {
+                    const borderWidth = getPixelValue(state.defaultShapeProps.borderWidth);
+                    const headSize = borderWidth * 5;
+                    const padding = headSize / 2;
+                    drawLength = Math.max(0, length - padding);
+                }
+                shape.style.width = `${drawLength}px`;
+                shape.style.transform = `rotate(${angle}deg)`;
+            } else { // Rectangle, Circle, Diamond
+                const left = Math.min(state.drawing.startX, currentPos.x);
+                const top = Math.min(state.drawing.startY, currentPos.y);
+                const width = Math.abs(currentPos.x - state.drawing.startX);
+                const height = Math.abs(currentPos.y - state.drawing.startY);
+                shape.style.left = `${left}px`;
+                shape.style.top = `${top}px`;
+                shape.style.width = `${width}px`;
+                shape.style.height = `${height}px`;
+            }
+        } else if (state.currentTool === 'handwrite' && state.handwriting.isDrawing) {
+            state.handwriting.ctx.lineTo(e.clientX, e.clientY);
+            state.handwriting.ctx.stroke();
+        }
+    }
+
+    function handleMouseUp(e) {
+        if (state.isPanning) state.isPanning = false;
+        else if (state.isDraggingShape) state.isDraggingShape = false;
+        else if (state.isDrawing) {
+            state.isDrawing = false;
+            const endPos = screenToWorld(e.clientX, e.clientY);
+            const dragDistance = Math.hypot(endPos.x - state.drawing.startX, endPos.y - state.drawing.startY);
+
+            if (state.currentTool === 'text') {
+                if (dragDistance < 5) createTextInput(endPos);
+            } else {
+                const finalShape = state.drawing.shape;
+                if (finalShape) {
+                    const width = getPixelValue(finalShape.style.width) || 0;
+                    if (width > 2 || state.currentTool.match(/line|arrow/)) { // A small tolerance for drawing
+                        finalizeShape(finalShape);
+                    } else {
+                        DOMElements.canvas.removeChild(finalShape);
+                    }
+                }
+            }
+            state.drawing.shape = null;
+        } else if (state.currentTool === 'handwrite' && state.handwriting.isDrawing) {
+            state.handwriting.isDrawing = false;
+            finalizeHandwriting();
+        }
+        updateCursor();
+    }
+
+    function handleWheel(e) { e.preventDefault(); const zoomIntensity = 0.1; const wheel = e.deltaY < 0 ? 1 : -1; const zoom = Math.exp(wheel * zoomIntensity); const mousePos = { x: e.clientX, y: e.clientY }; const worldX = (mousePos.x - state.camera.x) / state.camera.scale; const worldY = (mousePos.y - state.camera.y) / state.camera.scale; state.camera.scale = Math.max(0.1, Math.min(5, state.camera.scale * zoom)); state.camera.x = mousePos.x - worldX * state.camera.scale; state.camera.y = mousePos.y - worldY * state.camera.scale; updateTransform(); }
+
+    // --- SHAPE CREATION & FINALIZATION ---
+    function createShapeElement(tool, type) {
+        const shape = document.createElement('div');
+        shape.classList.add('shape');
+        if (type === 'preview-shape') shape.classList.add('preview-shape');
+
+        shape.dataset.shapeType = tool;
+        if (tool === 'circle') shape.style.borderRadius = '50%';
+        if (tool === 'diamond') shape.classList.add('diamond-shape');
+        if (tool === 'line') shape.classList.add('line-shape');
+        if (tool === 'arrow') shape.classList.add('arrow-shape');
+        if (tool === 'text') shape.classList.add('text-shape');
+
+        if (type === 'preview-shape') shape.style.borderWidth = state.defaultShapeProps.borderWidth;
+        return shape;
+    }
+
+    function finalizeShape(shape) {
+        shape.classList.remove('preview-shape');
+        const props = state.defaultShapeProps;
+        const tool = shape.dataset.shapeType;
+
+        shape.style.backgroundColor = (['rectangle', 'circle', 'diamond'].includes(tool)) ? props.backgroundColor : 'transparent';
+        if (['rectangle', 'diamond'].includes(tool)) shape.classList.add(props.lineStyleClass);
+        if (tool === 'rectangle') shape.classList.add(props.cornerStyleClass);
+
+        if (tool === 'diamond') {
+            const borderWidth = getPixelValue(props.borderWidth);
+            shape.style.setProperty('--diamond-border-color', props.borderColor);
+            shape.style.setProperty('--diamond-border-width', props.borderWidth);
+            // BUGFIX 2: Adjust position to account for the pseudo-element border
+            shape.style.left = `${getPixelValue(shape.style.left) - borderWidth}px`;
+            shape.style.top = `${getPixelValue(shape.style.top) - borderWidth}px`;
+        } else {
+            shape.style.borderColor = props.borderColor;
+            shape.style.borderWidth = props.borderWidth;
+            shape.style.borderStyle = props.borderStyle;
+        }
+
+        if (tool === 'arrow') {
+            const borderWidth = getPixelValue(props.borderWidth);
+            const headSize = borderWidth * 5;
+            const padding = headSize / 2;
+            shape.style.setProperty('--arrow-head-size', `${headSize}px`);
+            shape.style.paddingRight = `${padding}px`;
+            shape.style.width = `${Math.max(0, getPixelValue(shape.style.width) - padding)}px`;
+        }
+
+        shape.style.zIndex = state.zIndexCounter++;
+    }
+
+    function createTextInput(pos) { /* ... no changes ... */ const textarea = document.createElement('textarea'); textarea.classList.add('temp-text-input'); textarea.style.transform = `scale(${state.camera.scale})`; textarea.style.transformOrigin = 'top left'; const screenPos = { x: pos.x * state.camera.scale + state.camera.x, y: pos.y * state.camera.scale + state.camera.y }; textarea.style.left = `${screenPos.x}px`; textarea.style.top = `${screenPos.y}px`; document.body.appendChild(textarea); textarea.focus(); const finalizeText = () => { const text = textarea.value; document.body.removeChild(textarea); if (text) { DOMElements.textMeasurer.textContent = text; const textWidth = DOMElements.textMeasurer.offsetWidth; const textShape = createShapeElement('text'); textShape.style.left = `${pos.x}px`; textShape.style.top = `${pos.y}px`; textShape.style.width = `${textWidth}px`; textShape.textContent = text; finalizeShape(textShape); DOMElements.canvas.appendChild(textShape); } }; textarea.addEventListener('blur', finalizeText); textarea.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); textarea.blur(); } }); }
+    function finalizeHandwriting() { /* ... no changes ... */ const dataUrl = DOMElements.drawingLayer.toDataURL(); const img = new Image(); img.src = dataUrl; img.onload = () => { if (img.width <= 1 || img.height <= 1) return; const shape = createShapeElement('handwrite'); const worldPos = screenToWorld(0, 0); shape.style.left = `${worldPos.x}px`; shape.style.top = `${worldPos.y}px`; shape.style.width = `${DOMElements.drawingLayer.width / state.camera.scale}px`; shape.style.height = `${DOMElements.drawingLayer.height / state.camera.scale}px`; shape.appendChild(img); shape.style.zIndex = state.zIndexCounter++; DOMElements.canvas.appendChild(shape); state.handwriting.ctx.clearRect(0, 0, DOMElements.drawingLayer.width, DOMElements.drawingLayer.height); }; }
+
+    // --- PROPERTY & THEME CHANGE HANDLERS ---
+    function handlePropertyChange(prop, value) {
+        const target = state.selectedShape || state.defaultShapeProps;
+        const isDefault = !state.selectedShape;
+
+        if (isDefault) {
+            const isClassProp = prop.endsWith('-class');
+            if(isClassProp) {
+                const key = prop === 'line-style-class' ? 'lineStyleClass' : 'cornerStyleClass';
+                target[key] = value;
+            } else {
+                target[prop] = value;
+            }
+            return;
+        }
+
+        const shape = state.selectedShape;
+        const tool = shape.dataset.shapeType;
+        if (tool.match(/handwrite|text/)) return;
+
+        switch (prop) {
+            case 'borderColor':
+                // BUGFIX 1: Correctly target diamond border color
+                if (tool === 'diamond') shape.style.setProperty('--diamond-border-color', value);
+                else shape.style.borderColor = value;
+                break;
+            case 'borderWidth':
+                const widthValue = getPixelValue(value);
+                if (tool === 'diamond') {
+                    shape.style.setProperty('--diamond-border-width', value);
+                } else if (tool === 'arrow') {
+                    const oldPadding = getPixelValue(shape.style.paddingRight);
+                    const headSize = widthValue * 5;
+                    const newPadding = headSize / 2;
+                    shape.style.borderWidth = value;
+                    shape.style.setProperty('--arrow-head-size', `${headSize}px`);
+                    shape.style.paddingRight = `${newPadding}px`;
+                    // Adjust width to maintain visual length
+                    shape.style.width = `${getPixelValue(shape.style.width) + oldPadding - newPadding}px`;
+                } else {
+                    shape.style.borderWidth = value;
+                }
+                break;
+            case 'borderStyle':
+                if (tool !== 'diamond') shape.style.borderStyle = value;
+                break;
+            case 'backgroundColor':
+                if (tool !== 'line' && tool !== 'arrow') shape.style.backgroundColor = value;
+                break;
+            case 'line-style-class':
+            case 'corner-style-class':
+                const classesToRemove = prop === 'line-style-class' ? ['line-style-1', 'line-style-2', 'line-style-3'] : ['corner-straight', 'corner-rounded'];
+                if (tool !== 'circle') {
+                    shape.classList.remove(...classesToRemove);
+                    shape.classList.add(value);
+                }
+                break;
+        }
+    }
+
+    function handleThemeChange(themeName) { /* ... no changes ... */ document.body.dataset.theme = themeName; localStorage.setItem('canvas-theme', themeName); const bodyStyle = getComputedStyle(document.body); const newPrimaryColor = bodyStyle.getPropertyValue('--color-primary').trim(); state.defaultShapeProps.borderColor = newPrimaryColor; document.getElementById('stroke-color').value = newPrimaryColor; state.handwriting.color = newPrimaryColor; document.getElementById('handwrite-color').value = newPrimaryColor; setupHandwritingCanvas(); }
+    function setupHandwritingCanvas() { /* ... no changes ... */ const dpr = window.devicePixelRatio || 1; const rect = DOMElements.drawingLayer.getBoundingClientRect(); DOMElements.drawingLayer.width = rect.width * dpr; DOMElements.drawingLayer.height = rect.height * dpr; state.handwriting.ctx = DOMElements.drawingLayer.getContext('2d'); state.handwriting.ctx.scale(dpr, dpr); state.handwriting.ctx.strokeStyle = state.handwriting.color; state.handwriting.ctx.lineWidth = state.handwriting.width; state.handwriting.ctx.lineCap = 'round'; state.handwriting.ctx.lineJoin = 'round'; }
+
+    // --- Event Listeners Setup ---
+    document.querySelectorAll('#property-panel .button-group').forEach(group => { group.addEventListener('click', e => { if (e.target.tagName !== 'BUTTON') return; const button = e.target; group.querySelector('.active')?.classList.remove('active'); button.classList.add('active'); const propMap = { 'stroke-width-group': 'borderWidth', 'border-style-group': 'borderStyle', 'line-style-group': 'line-style-class', 'corner-style-group': 'corner-style-class', }; if (propMap[group.id]) handlePropertyChange(propMap[group.id], button.dataset.value); }); });
+    document.getElementById('stroke-color').addEventListener('input', e => handlePropertyChange('borderColor', e.target.value));
+    document.getElementById('bg-color').addEventListener('input', e => handlePropertyChange('backgroundColor', e.target.value));
+    document.getElementById('bg-toggle').addEventListener('change', e => { const isEnabled = e.target.checked; document.getElementById('bg-color').disabled = !isEnabled; const newColor = isEnabled ? document.getElementById('bg-color').value : 'transparent'; handlePropertyChange('backgroundColor', newColor); });
+    document.getElementById('theme-group').addEventListener('click', e => { const button = e.target.closest('button'); if(button) handleThemeChange(button.dataset.theme); });
+    document.getElementById('handwrite-color').addEventListener('input', e => { state.handwriting.color = e.target.value; setupHandwritingCanvas(); });
+    document.getElementById('handwrite-width-group').addEventListener('click', e => { if (e.target.tagName !== 'BUTTON') return; state.handwriting.width = parseInt(e.target.dataset.value, 10); setupHandwritingCanvas(); document.getElementById('handwrite-width-group').querySelector('.active').classList.remove('active'); e.target.classList.add('active'); });
+    document.getElementById('btn-front').addEventListener('click', () => { if (state.selectedShape) state.selectedShape.style.zIndex = state.zIndexCounter++; });
+    document.getElementById('btn-back').addEventListener('click', () => { if (state.selectedShape) state.selectedShape.style.zIndex = 0; });
+    document.getElementById('btn-up').addEventListener('click', () => { if (state.selectedShape) { let z = parseInt(state.selectedShape.style.zIndex || 0); state.selectedShape.style.zIndex = z + 1; } });
+    document.getElementById('btn-down').addEventListener('click', () => { if (state.selectedShape) { let z = parseInt(state.selectedShape.style.zIndex || 0); state.selectedShape.style.zIndex = Math.max(0, z - 1); } });
+    DOMElements.toolbar.addEventListener('click', handleToolbarClick);
+    DOMElements.viewport.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    DOMElements.viewport.addEventListener('wheel', handleWheel, { passive: false });
+    window.addEventListener('resize', setupHandwritingCanvas);
+
+    // --- Initial Setup ---
+    const savedTheme = localStorage.getItem('canvas-theme') || 'default';
+    handleThemeChange(savedTheme);
+    updateButtonGroup('theme-group', savedTheme);
+    setupHandwritingCanvas();
+    updateTransform();
+    updateCursor();
+</script>
+</body>
+</html>
